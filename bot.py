@@ -26,7 +26,8 @@ async def youtube_search(query: str) -> list:
 async def download_audio(query: str, output_dir="/tmp") -> tuple:
     loop = asyncio.get_event_loop()
     def _download():
-        ydl_opts = {
+        # أولاً نحاول مع ffmpeg لتحويل لـ mp3
+        ydl_opts_ffmpeg = {
             "format": "bestaudio/best",
             "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
             "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "128"}],
@@ -34,15 +35,30 @@ async def download_audio(query: str, output_dir="/tmp") -> tuple:
             "no_warnings": True,
             "default_search": "ytsearch",
         }
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch:{query}", download=True)
-            if "entries" in info:
-                info = info["entries"][0]
-            title = info.get("title", query)
-            files = glob.glob(f"{output_dir}/*.mp3")
-            if files:
-                return max(files, key=os.path.getctime), title
-            return None, title
+        # إذا ffmpeg مش موجود نحمّل الصوت مباشرة بدون تحويل
+        ydl_opts_noffmpeg = {
+            "format": "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio/best",
+            "outtmpl": f"{output_dir}/%(title)s.%(ext)s",
+            "quiet": True,
+            "no_warnings": True,
+            "default_search": "ytsearch",
+        }
+        for ydl_opts in [ydl_opts_ffmpeg, ydl_opts_noffmpeg]:
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(f"ytsearch:{query}", download=True)
+                    if "entries" in info:
+                        info = info["entries"][0]
+                    title = info.get("title", query)
+                    files = (glob.glob(f"{output_dir}/*.mp3") +
+                             glob.glob(f"{output_dir}/*.m4a") +
+                             glob.glob(f"{output_dir}/*.webm") +
+                             glob.glob(f"{output_dir}/*.ogg"))
+                    if files:
+                        return max(files, key=os.path.getctime), title
+            except Exception:
+                continue
+        return None, query
     return await loop.run_in_executor(None, _download)
 
 async def download_video(query: str, output_dir="/tmp") -> tuple:
@@ -501,9 +517,9 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for i, r in enumerate(results[:5], 1):
                 title = r.get("title", "بدون عنوان")[:50]
                 url = f"https://youtu.be/{r.get('id','')}"
-                duration = r.get("duration", 0)
-                mins = duration // 60 if duration else 0
-                secs = duration % 60 if duration else 0
+                duration = int(r.get("duration", 0) or 0)
+                mins = duration // 60
+                secs = duration % 60
                 text_out += f"{i}️⃣ {title} [{mins}:{secs:02d}]\n"
                 buttons.append([InlineKeyboardButton(f"▶️ {title[:30]}", url=url)])
             buttons.append([InlineKeyboardButton("العودة", callback_data="back_main")])
