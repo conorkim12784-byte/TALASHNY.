@@ -12,6 +12,20 @@ from telegram.ext import (
 )
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   مكتبات التشغيل الصوتي
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+try:
+    from pyrogram import Client
+    from pytgcalls import PyTgCalls
+    from pytgcalls.types import MediaStream, AudioQuality, VideoQuality
+    VOICE_ENABLED = True
+except ImportError:
+    VOICE_ENABLED = False
+
+pyro_app = None
+pytgcalls_client = None
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #   دوال يوتيوب الحقيقية
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def youtube_search(query: str) -> list:
@@ -95,6 +109,19 @@ OWNER_ID = 1923931101  # ضع ID الأدمن هنا بعد أول تشغيل
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
+async def safe_edit(q, text=None, caption=None, reply_markup=None, parse_mode=None):
+    """يحاول يعدل الكابشن، وإذا فشل يعدل النص العادي"""
+    msg_text = caption or text
+    try:
+        await safe_edit(q, caption=msg_text, reply_markup=reply_markup, parse_mode=parse_mode)
+    except Exception:
+        try:
+            await q.edit_message_text(text=msg_text, reply_markup=reply_markup, parse_mode=parse_mode)
+        except Exception:
+            await q.message.reply_text(text=msg_text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #           قواعد البيانات
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -107,6 +134,99 @@ welcome_msg = {}
 bot_users = set()
 bot_groups = set()
 active_calls = {}   # {chat_id: {"playing": True, "paused": False, "loop": False, "title": ""}}
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   تهيئة عميل Pyrogram + PyTgCalls
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async def init_voice_client():
+    global pyro_app, pytgcalls_client
+    if not VOICE_ENABLED:
+        return False
+    try:
+        pyro_app = Client(
+            "voice_bot",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            phone_number=PHONE,
+            in_memory=True
+        )
+        await pyro_app.start()
+        pytgcalls_client = PyTgCalls(pyro_app)
+        await pytgcalls_client.start()
+        return True
+    except Exception as e:
+        logging.error(f"فشل تهيئة الكول: {e}")
+        return False
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#   دالة التشغيل الحقيقي في الكول
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+async def play_in_call(update, context, query: str, msg, is_video: bool = False):
+    chat_id = update.effective_chat.id
+    
+    if not VOICE_ENABLED or pytgcalls_client is None:
+        await msg.edit_text(
+            "⚠️ ميزة التشغيل في الكول تحتاج إعداد حساب مساعد (Userbot)\n"
+            "تأكد من إضافة pyrogram و pytgcalls في requirements.txt وتشغيل الحساب المساعد أولاً"
+        )
+        return
+
+    try:
+        # تحميل الصوت/الفيديو
+        if is_video:
+            filepath, title = await download_video(query)
+        else:
+            filepath, title = await download_audio(query)
+
+        if not filepath or not os.path.exists(filepath):
+            await msg.edit_text(f"❌ فشل تحميل: {query}")
+            return
+
+        await msg.edit_text(f"{'🎬' if is_video else '🎵'} {'جاري رفع الفيديو' if is_video else 'جاري التشغيل'}: {title}\n⚡ Developer by {DEVELOPER}")
+
+        # الانضمام للكول وتشغيل الملف
+        if is_video:
+            stream = MediaStream(
+                filepath,
+                audio_quality=AudioQuality.HIGH,
+                video_quality=VideoQuality.SD_480p
+            )
+        else:
+            stream = MediaStream(
+                filepath,
+                audio_quality=AudioQuality.HIGH,
+                video_flags=MediaStream.IGNORE
+            )
+
+        active = active_calls.get(chat_id)
+        if active:
+            # إذا في تشغيل حالي - غير المقطع
+            await pytgcalls_client.change_stream(chat_id, stream)
+        else:
+            # انضم للكول وابدأ التشغيل
+            await pytgcalls_client.play(chat_id, stream)
+
+        active_calls[chat_id] = {"playing": True, "paused": False, "loop": False, "title": title, "file": filepath}
+
+        await msg.edit_text(
+            f"{'🎬' if is_video else '🎵'} يشتغل الآن: {title}\n\n⚡ Developer by {DEVELOPER}",
+            reply_markup=player_keyboard(chat_id)
+        )
+
+    except Exception as e:
+        err = str(e)
+        if "not in" in err.lower() or "GroupCallNotFound" in err or "not found" in err.lower():
+            await msg.edit_text("❌ البوت مش في دردشة صوتية - افتح كول أولاً ثم اكتب الأمر")
+        else:
+            await msg.edit_text(f"❌ خطأ في التشغيل: {err[:150]}")
+        # تنظيف الملف لو فيه
+        try:
+            fp = active_calls.get(chat_id, {}).get("file")
+            if fp and os.path.exists(fp):
+                os.remove(fp)
+        except Exception:
+            pass
+
 
 def is_admin(user_id, chat_id):
     return user_id == OWNER_ID or user_id in admins_db.get(chat_id, [])
@@ -174,7 +294,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def show_commands(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    await q.edit_message_caption(caption="⚡ اختر قسم الأوامر:", reply_markup=commands_menu_keyboard())
+    await safe_edit(q, caption="⚡ اختر قسم الأوامر:", reply_markup=commands_menu_keyboard())
 
 async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -182,23 +302,21 @@ async def back_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (f"⚡ اهلا بك عزيزي {user.first_name}\n≡ : انا بوت اسمي نقيب\n"
             f"≡ : يمكنني تشغيل الموسيقى في الاتصال\n≡ : ادعم تشغيل منصات ‹ يوتيوب › ولخ .\n\n"
             f"⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=main_menu_keyboard())
+    await safe_edit(q, caption=text, reply_markup=main_menu_keyboard())
 
 async def show_developer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    await q.edit_message_caption(
-        caption=f"⚡ المطور: {DEVELOPER}\n━━━━━━━━━━━━━━━━━━\nللتواصل مع المطور اضغط الزر بالأسفل",
+    await safe_edit(q, caption=f"⚡ المطور: {DEVELOPER}\n━━━━━━━━━━━━━━━━━━\nللتواصل مع المطور اضغط الزر بالأسفل",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("تواصل مع المطور", url="https://t.me/yourusername")],[InlineKeyboardButton("العودة", callback_data="back_main")]]))
 
 async def show_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    await q.edit_message_caption(
-        caption="⚡ لشراء بوت خاص بك:\n━━━━━━━━━━━━━━━━━━\nتواصل مع المطور للحصول على بوت مخصص",
+    await safe_edit(q, caption="⚡ لشراء بوت خاص بك:\n━━━━━━━━━━━━━━━━━━\nتواصل مع المطور للحصول على بوت مخصص",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("تواصل للشراء", url="https://t.me/yourusername")],[InlineKeyboardButton("العودة", callback_data="back_main")]]))
 
 async def show_languages(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
-    await q.edit_message_caption(caption="⚡ اختر لغة البوت:",
+    await safe_edit(q, caption="⚡ اختر لغة البوت:",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🇸🇦 العربية", callback_data="lang_ar"),InlineKeyboardButton("🇬🇧 English", callback_data="lang_en")],[InlineKeyboardButton("العودة", callback_data="back_main")]]))
 
 async def cmd_play_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -211,7 +329,7 @@ async def cmd_play_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "« ايقاف مؤقت / استكمال\n« تخطي - تخطي الأغنية\n"
             "« ايقاف / اسكت - وقف التشغيل\n« تكرار / كررها - تكرار الحالي\n"
             f"« تمرير [ثواني] - تغيير الوقت\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_protection_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -223,7 +341,7 @@ async def cmd_protection_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "« تعين اسم - تعين اسم المجموعه\n« تعين صوره - صورة المجموعه\n"
             "« تفعيل/تعطيل الترحيب\n« رفع مشرف - تنزيل مشرف\n\n"
             f"⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -233,14 +351,14 @@ async def cmd_admin_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "- تفعيل/تعطيل الاشتراك الإجباري\n"
             "- تفعيل/تعطيل سجل التشغيل\n"
             f"- قسم الترويج ؛ إعلان عن مميزات البوت\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_filters_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     text = ("اوامر المنع ⚡:\n━━━━━━━━━━━━━━━━━━\n"
             "« منع الروابط - فتح الروابط\n« منع الاسائله - فتح الاسائله\n"
             f"« منع الاباحي - فتح الاباحي\n« منع التوجيه - فتح التوجيه\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_responses_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -248,14 +366,14 @@ async def cmd_responses_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "استخدام: اضف رد [الكلمة] [الرد]\n\n"
             "- اضف رد عام → رد في جميع المحادثات\n"
             f"- اضف رد متعدد → رد عشوائي من عدة ردود\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_ranks_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
     text = ("اوامر الرتب ⚡:\n━━━━━━━━━━━━━━━━━━\n"
             "- اضف رتبه → انشاء رتبه جديده\n- حذف رتبه → حذف رتبه موجوده\n"
             f"- ترقيه + اسم الرتبه → اضافه صلاحيات\n- عزل + اسم الرتبه → ازاله صلاحيات\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 async def cmd_extra_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query; await q.answer()
@@ -263,7 +381,7 @@ async def cmd_extra_cb(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "• صراحه » اسئلة صراحه\n• فزوره » فزوره وتحلها\n"
             "• تحدي » تحديات مسليه\n• لو خيروك » اختار من اتنين\n"
             f"• امثله » امثله معروفه\n• اسئله » اسئله متنوعه\n\n⚡ Developer by {DEVELOPER}")
-    await q.edit_message_caption(caption=text, reply_markup=back_btn())
+    await safe_edit(q, caption=text, reply_markup=back_btn())
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #   Callbacks - التحكم في المشغل
@@ -284,15 +402,25 @@ async def player_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if state.get("paused"):
             state["paused"] = False
             status = "▶️ تم استكمال التشغيل"
+            if VOICE_ENABLED and pytgcalls_client:
+                try: await pytgcalls_client.resume_stream(chat_id)
+                except Exception: pass
         else:
             state["paused"] = True
             status = "⏸ تم ايقاف التشغيل مؤقتاً"
+            if VOICE_ENABLED and pytgcalls_client:
+                try: await pytgcalls_client.pause_stream(chat_id)
+                except Exception: pass
         active_calls[chat_id] = state
         await q.edit_message_text(f"{status}\n🎵 {state.get('title','')}", reply_markup=player_keyboard(chat_id))
 
     elif data.startswith("skip_"):
         state["playing"] = False
         active_calls[chat_id] = state
+        if VOICE_ENABLED and pytgcalls_client:
+            try: await pytgcalls_client.leave_call(chat_id)
+            except Exception: pass
+        active_calls.pop(chat_id, None)
         await q.edit_message_text(f"⏭ تم تخطي الأغنية\n\n⚡ Developer by {DEVELOPER}")
 
     elif data.startswith("loop_"):
@@ -303,6 +431,14 @@ async def player_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=player_keyboard(chat_id))
 
     elif data.startswith("stop_"):
+        if VOICE_ENABLED and pytgcalls_client:
+            try: await pytgcalls_client.leave_call(chat_id)
+            except Exception: pass
+        # تنظيف الملف
+        fp = state.get("file")
+        if fp and os.path.exists(fp):
+            try: os.remove(fp)
+            except Exception: pass
         active_calls.pop(chat_id, None)
         await q.edit_message_text(f"⏹ تم ايقاف التشغيل\n\n⚡ Developer by {DEVELOPER}")
 
@@ -334,7 +470,7 @@ async def unmute_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message.reply_to_message:
         await update.message.reply_text("↩️ رد على رسالة المستخدم"); return
     target = update.message.reply_to_message.from_user
-    await update.effective_chat.restrict_member(target.id, ChatPermissions(can_send_messages=True, can_send_media_messages=True, can_send_other_messages=True, can_add_web_page_previews=True))
+    await update.effective_chat.restrict_member(target.id, ChatPermissions(can_send_messages=True, can_send_other_messages=True, can_send_polls=True, can_send_audios=True, can_send_documents=True, can_send_photos=True, can_send_videos=True, can_send_video_notes=True, can_send_voice_notes=True, can_add_web_page_previews=True))
     await update.message.reply_text(f"🔊 تم الغاء كتم {target.mention_html()}", parse_mode="HTML")
 
 async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -481,28 +617,19 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ━ شغل / تشغيل
     if text.startswith("شغل ") or text.startswith("تشغيل "):
         query = text.split(" ", 1)[1]
-        active_calls[chat_id] = {"playing": True, "paused": False, "loop": False, "title": query}
-        await update.message.reply_text(
-            f"🎵 جاري تشغيل: {query}\n⏳ يتم التحميل من يوتيوب...\n\n⚡ Developer by {DEVELOPER}",
-            reply_markup=player_keyboard(chat_id)
-        )
+        msg = await update.message.reply_text(f"🎵 جاري تشغيل: {query}\n⏳ يتم التحميل من يوتيوب...")
+        await play_in_call(update, context, query, msg, is_video=False)
 
     elif text.startswith("فيد ") or text.startswith("فيديو "):
         query = text.split(" ", 1)[1]
-        active_calls[chat_id] = {"playing": True, "paused": False, "loop": False, "title": query}
-        await update.message.reply_text(
-            f"🎬 جاري تشغيل فيديو: {query}\n⏳ يتم التحميل...\n\n⚡ Developer by {DEVELOPER}",
-            reply_markup=player_keyboard(chat_id)
-        )
+        msg = await update.message.reply_text(f"🎬 جاري تشغيل فيديو: {query}\n⏳ يتم التحميل...")
+        await play_in_call(update, context, query, msg, is_video=True)
 
     elif text == "تشغيل عشوائي":
         songs = ["Blinding Lights", "Shape of You", "Bohemian Rhapsody", "Stay", "Levitating"]
         song = random.choice(songs)
-        active_calls[chat_id] = {"playing": True, "paused": False, "loop": False, "title": song}
-        await update.message.reply_text(
-            f"🎲 تشغيل عشوائي: {song}\n\n⚡ Developer by {DEVELOPER}",
-            reply_markup=player_keyboard(chat_id)
-        )
+        msg = await update.message.reply_text(f"🎲 تشغيل عشوائي: {song}\n⏳ يتم التحميل...")
+        await play_in_call(update, context, song, msg, is_video=False)
 
     elif text.startswith("بحث "):
         query = text[4:]
@@ -777,6 +904,16 @@ async def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
 
     print("⚡ البوت شغال...")
+    # تهيئة الحساب المساعد للتشغيل الصوتي
+    if VOICE_ENABLED:
+        voice_ok = await init_voice_client()
+        if voice_ok:
+            print("✅ الحساب المساعد شغال - التشغيل الصوتي جاهز")
+        else:
+            print("⚠️ فشل تشغيل الحساب المساعد - أوامر الكول مش هتشتغل")
+    else:
+        print("⚠️ pyrogram/pytgcalls مش مثبتين - أوامر الكول معطلة")
+    
     await app.initialize()
     await app.start()
     await app.updater.start_polling()
