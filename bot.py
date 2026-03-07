@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "YOUR_BOT_TOKEN_HERE"
+BOT_TOKEN = "5715894811:AAEdH_xnLRq1zoNMvZITgQSpJWn8pPjkb4k"
 KICK_BAN_LIMIT = 20
 tracker = KickTracker()
 
