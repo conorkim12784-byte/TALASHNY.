@@ -17,7 +17,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-BOT_TOKEN = "5715894811:AAEdH_xnLRq1zoNMvZITgQSpJWn8pPjkb4k"
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 KICK_BAN_LIMIT = 20
 tracker = KickTracker()
 
@@ -95,6 +96,31 @@ promote_sessions = {}
 # PROMOTE
 # ==============================
 
+import uuid
+
+def make_session_key():
+    """مفتاح جلسة فريد بدون _ عشان ميتكسرش في الـ callback"""
+    return uuid.uuid4().hex  # مثال: a3f9c1d2e4b5...
+
+# ربط message_id بـ session_key عشان نعرف نرجع للجلسة
+msg_to_session = {}
+
+def build_promote_keyboard(session_key, p):
+    def btn(label, key):
+        icon = "✅" if p.get(key, False) else "❌"
+        return InlineKeyboardButton(f"{icon} {label}", callback_data=f"tgl.{session_key}.{key}")
+    title_label = f"✏️ اللقب: {p.get('title', '') or 'بدون'}"
+    return [
+        [btn("حذف الرسايل", "delete"), btn("حظر الأعضاء", "ban")],
+        [btn("تثبيت الرسايل", "pin"), btn("تغيير المعلومات", "info")],
+        [btn("إضافة مشرفين", "add_admins"), btn("الدعوة بلينك", "invite")],
+        [InlineKeyboardButton(title_label, callback_data=f"title.{session_key}")],
+        [
+            InlineKeyboardButton("🚀 رفعه مشرف", callback_data=f"confirm.{session_key}"),
+            InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel.{session_key}"),
+        ]
+    ]
+
 async def handle_promote(update, context, arg):
     if update.message.from_user.id != DEVELOPER_ID:
         await update.message.reply_text("❌ أمر رفع المشرفين متاح للمطور فقط!")
@@ -108,72 +134,68 @@ async def handle_promote(update, context, arg):
         )
         return
     chat_id = update.message.chat_id
-    session_key = f"{chat_id}_{update.message.from_user.id}"
+    session_key = make_session_key()
     promote_sessions[session_key] = {
         "target_id": target_id,
         "target_name": target_name,
         "chat_id": chat_id,
-        "permissions": {"delete": True, "ban": True, "pin": False, "info": False, "add_admins": False, "invite": True}
+        "awaiting_title": False,
+        "permissions": {
+            "delete": True, "ban": True, "pin": False,
+            "info": False, "add_admins": False, "invite": True,
+            "title": ""
+        }
     }
     p = promote_sessions[session_key]["permissions"]
-
-    def btn(label, key):
-        icon = "✅" if p.get(key, False) else "❌"
-        return InlineKeyboardButton(f"{icon} {label}", callback_data=f"toggle_{session_key}_{key}")
-
-    keyboard = [
-        [btn("حذف الرسايل", "delete"), btn("حظر الأعضاء", "ban")],
-        [btn("تثبيت الرسايل", "pin"), btn("تغيير المعلومات", "info")],
-        [btn("إضافة مشرفين", "add_admins"), btn("الدعوة بلينك", "invite")],
-        [
-            InlineKeyboardButton("🚀 رفعه مشرف", callback_data=f"confirm_{session_key}"),
-            InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel_{session_key}"),
-        ]
-    ]
-    await update.message.reply_text(
+    keyboard = build_promote_keyboard(session_key, p)
+    sent = await update.message.reply_text(
         f"🛡 رفع مشرف: <b>{target_name}</b>\n\nاختار صلاحياته:",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+    promote_sessions[session_key]["msg_id"] = sent.message_id
+    msg_to_session[f"{chat_id}_{sent.message_id}"] = session_key
 
 async def promote_callback(update, context):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data.startswith("toggle_"):
-        rest = data[len("toggle_"):]
-        last_underscore = rest.rfind("_")
-        session_key = rest[:last_underscore]
-        perm = rest[last_underscore + 1:]
+    # ---- toggle صلاحية ----
+    if data.startswith("tgl."):
+        _, session_key, perm = data.split(".", 2)
         if session_key not in promote_sessions:
             await query.edit_message_text("❌ انتهت الجلسة، جرب تاني.")
             return
         session = promote_sessions[session_key]
         session["permissions"][perm] = not session["permissions"].get(perm, False)
         p = session["permissions"]
-
-        def btn(label, key):
-            icon = "✅" if p.get(key, False) else "❌"
-            return InlineKeyboardButton(f"{icon} {label}", callback_data=f"toggle_{session_key}_{key}")
-
-        keyboard = [
-            [btn("حذف الرسايل", "delete"), btn("حظر الأعضاء", "ban")],
-            [btn("تثبيت الرسايل", "pin"), btn("تغيير المعلومات", "info")],
-            [btn("إضافة مشرفين", "add_admins"), btn("الدعوة بلينك", "invite")],
-            [
-                InlineKeyboardButton("🚀 رفعه مشرف", callback_data=f"confirm_{session_key}"),
-                InlineKeyboardButton("❌ إلغاء", callback_data=f"cancel_{session_key}"),
-            ]
-        ]
+        keyboard = build_promote_keyboard(session_key, p)
         await query.edit_message_text(
             f"🛡 رفع مشرف: <b>{session['target_name']}</b>\n\nاختار صلاحياته:",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
-    elif data.startswith("confirm_"):
-        session_key = data[len("confirm_"):]
+    # ---- طلب كتابة اللقب ----
+    elif data.startswith("title."):
+        _, session_key = data.split(".", 1)
+        if session_key not in promote_sessions:
+            await query.edit_message_text("❌ انتهت الجلسة.")
+            return
+        promote_sessions[session_key]["awaiting_title"] = True
+        promote_sessions[session_key]["query_msg_id"] = query.message.message_id
+        await query.edit_message_text(
+            f"✏️ اكتب اللقب اللي عايزه للمشرف <b>{promote_sessions[session_key]['target_name']}</b>\n"
+            f"(أو ابعت <b>لا</b> عشان تشيل اللقب)",
+            parse_mode="HTML"
+        )
+        # خزّن session_key في context عشان الرسالة الجاية
+        context.user_data["awaiting_title_session"] = session_key
+
+    # ---- تأكيد الرفع ----
+    elif data.startswith("confirm."):
+        _, session_key = data.split(".", 1)
         if session_key not in promote_sessions:
             await query.edit_message_text("❌ انتهت الجلسة.")
             return
@@ -190,17 +212,57 @@ async def promote_callback(update, context):
                 can_promote_members=p.get("add_admins", False),
                 can_invite_users=p.get("invite", False),
             )
+            # لو في لقب اضبطه
+            title = p.get("title", "").strip()
+            if title:
+                await context.bot.set_chat_administrator_custom_title(
+                    chat_id=session["chat_id"],
+                    user_id=session["target_id"],
+                    custom_title=title
+                )
+            title_line = f"\n🏷 اللقب: <b>{title}</b>" if title else ""
             await query.edit_message_text(
-                f"✅ تم رفع <b>{session['target_name']}</b> مشرف بنجاح! 🎉",
+                f"✅ تم رفع <b>{session['target_name']}</b> مشرف بنجاح! 🎉{title_line}",
                 parse_mode="HTML"
             )
         except TelegramError as e:
             await query.edit_message_text(f"❌ فشلت العملية: {e}")
 
-    elif data.startswith("cancel_"):
-        session_key = data[len("cancel_"):]
+    # ---- إلغاء ----
+    elif data.startswith("cancel."):
+        _, session_key = data.split(".", 1)
         promote_sessions.pop(session_key, None)
         await query.edit_message_text("❌ تم إلغاء العملية.")
+
+async def handle_title_input(update, context):
+    """استقبال نص اللقب من المطور"""
+    session_key = context.user_data.get("awaiting_title_session")
+    if not session_key or session_key not in promote_sessions:
+        return False
+
+    session = promote_sessions[session_key]
+    if not session.get("awaiting_title"):
+        return False
+
+    text = update.message.text.strip()
+    if text == "لا":
+        session["permissions"]["title"] = ""
+    else:
+        session["permissions"]["title"] = text[:16]  # تيليجرام بيقبل 16 حرف بس
+
+    session["awaiting_title"] = False
+    context.user_data.pop("awaiting_title_session", None)
+
+    p = session["permissions"]
+    keyboard = build_promote_keyboard(session_key, p)
+
+    # ابعت الكيبورد تاني
+    await update.message.reply_text(
+        f"🛡 رفع مشرف: <b>{session['target_name']}</b>\n\nاختار صلاحياته:",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return True
 
 # ==============================
 # DEMOTE
@@ -370,6 +432,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     text = update.message.text.strip()
     user_id = update.message.from_user.id
+
+    # لو المطور بيكتب لقب مشرف
+    if update.message.from_user.id == DEVELOPER_ID:
+        handled = await handle_title_input(update, context)
+        if handled:
+            return
 
     # تحقق من الأوامر العربية أولاً
     action, arg = parse_arabic_command(text)
