@@ -1,6 +1,6 @@
 python-telegram-bot==21.6
 yt-dlp
 aiohttp
-pyrofork==2.1.23
+pyrofork==2.3.69
 TgCrypto
 pytgcalls==3.0.0.dev24
