@@ -18,7 +18,7 @@ API_HASH = "71db0c8aae15effc04dcfc636e68c349"
 PHONE = "+201008967492"
 WELCOME_GIF = "https://i.postimg.cc/wxV3PspQ/1756574872401.gif"
 DEVELOPER = "ძᥲᖇᥱძᥱ᥎Ꭵᥣ"
-OWNER_ID = None  # ضع ID الأدمن هنا بعد أول تشغيل
+OWNER_ID = 1923931101  # ضع ID الأدمن هنا بعد أول تشغيل
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
