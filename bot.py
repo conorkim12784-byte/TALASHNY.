@@ -136,26 +136,170 @@ bot_groups = set()
 active_calls = {}   # {chat_id: {"playing": True, "paused": False, "loop": False, "title": ""}}
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#   تهيئة عميل Pyrogram + PyTgCalls
+#   نظام إنشاء الجلسة التلقائي
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-async def init_voice_client():
+
+# حالة إنشاء الجلسة لكل مستخدم
+session_setup_state = {}
+# { owner_id: {"step": "phone"/"code"/"password", "phone": "...", "client": Client} }
+
+SESSION_FILE = "/tmp/voice_session.session"
+
+async def start_session_setup(bot, owner_id: int, trigger_msg=None):
+    """ابدأ عملية إنشاء الجلسة - ابعت رسالة للأونر في الخاص"""
+    try:
+        await bot.send_message(
+            chat_id=owner_id,
+            text=(
+                "🔐 *إعداد الحساب المساعد للتشغيل الصوتي*\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "عشان البوت يشتغل في الدردشة الصوتية، محتاج حساب تليغرام مساعد.\n\n"
+                "📱 *ابعتلي رقم التليفون* بالصيغة الدولية:\n"
+                "مثال: `+201234567890`\n\n"
+                "⚠️ _سيتم استخدام هذا الحساب للانضمام للدردشات الصوتية فقط_"
+            ),
+            parse_mode="Markdown"
+        )
+        session_setup_state[owner_id] = {"step": "phone"}
+        if trigger_msg:
+            await trigger_msg.edit_text("📨 تم إرسال رسالة في خاصك لإعداد الحساب المساعد!")
+    except Exception as e:
+        if trigger_msg:
+            await trigger_msg.edit_text(
+                f"❌ مش قادر أبعت في خاصك!\n"
+                f"ابدأ محادثة مع البوت أولاً ثم أعد المحاولة.\n\nخطأ: {str(e)[:100]}"
+            )
+
+async def handle_session_setup(update, context):
+    """معالجة ردود الأونر أثناء إنشاء الجلسة"""
+    global pyro_app, pytgcalls_client
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+
+    if user_id not in session_setup_state:
+        return False  # مش في وضع الإعداد
+
+    state = session_setup_state[user_id]
+    step = state.get("step")
+
+    # ━ خطوة ١: استقبال رقم التليفون
+    if step == "phone":
+        phone = text
+        if not phone.startswith("+"):
+            await update.message.reply_text("❌ الرقم لازم يبدأ بـ + مثال: `+201234567890`", parse_mode="Markdown")
+            return True
+        try:
+            client = Client(
+                "voice_session",
+                api_id=API_ID,
+                api_hash=API_HASH,
+                in_memory=True
+            )
+            await client.connect()
+            sent = await client.send_code(phone)
+            state["step"] = "code"
+            state["phone"] = phone
+            state["client"] = client
+            state["phone_code_hash"] = sent.phone_code_hash
+            await update.message.reply_text(
+                "✅ تم إرسال كود التحقق على تليغرام!\n\n"
+                "🔢 *ابعتلي الكود بمسافة بين كل رقم*\n"
+                "مثال: `1 2 3 4 5`",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ في الرقم: {str(e)[:150]}")
+            session_setup_state.pop(user_id, None)
+        return True
+
+    # ━ خطوة ٢: استقبال كود التحقق
+    elif step == "code":
+        code = text.replace(" ", "").strip()
+        client = state.get("client")
+        phone = state.get("phone")
+        try:
+            await client.sign_in(phone, state["phone_code_hash"], code)
+            # نجح - احفظ الجلسة وابدأ pytgcalls
+            session_string = await client.export_session_string()
+            # احفظ الجلسة في ملف
+            with open(SESSION_FILE, "w") as f:
+                f.write(session_string)
+            pytgcalls_client = PyTgCalls(client)
+            await pytgcalls_client.start()
+            pyro_app = client
+            session_setup_state.pop(user_id, None)
+            await update.message.reply_text(
+                "✅ *تم إعداد الحساب المساعد بنجاح!*\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "🎵 دلوقتي البوت جاهز يشغل موسيقى في الدردشات الصوتية!\n\n"
+                "⚡ ارجع للمجموعة وكرر أمر التشغيل.",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            err = str(e)
+            if "PASSWORD_REQUIRED" in err or "two-step" in err.lower():
+                state["step"] = "password"
+                await update.message.reply_text(
+                    "🔒 الحساب عنده تحقق بخطوتين\n\n"
+                    "🔑 *ابعتلي كلمة السر:*",
+                    parse_mode="Markdown"
+                )
+            else:
+                await update.message.reply_text(f"❌ كود غلط أو منتهي: {err[:150]}")
+                session_setup_state.pop(user_id, None)
+        return True
+
+    # ━ خطوة ٣: كلمة السر (تحقق بخطوتين)
+    elif step == "password":
+        client = state.get("client")
+        try:
+            await client.check_password(text)
+            session_string = await client.export_session_string()
+            with open(SESSION_FILE, "w") as f:
+                f.write(session_string)
+            pytgcalls_client = PyTgCalls(client)
+            await pytgcalls_client.start()
+            pyro_app = client
+            session_setup_state.pop(user_id, None)
+            await update.message.reply_text(
+                "✅ *تم إعداد الحساب المساعد بنجاح!*\n"
+                "🎵 البوت جاهز يشغل موسيقى في الدردشات الصوتية!",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ كلمة السر غلط: {str(e)[:150]}")
+            session_setup_state.pop(user_id, None)
+        return True
+
+    return False
+
+async def load_existing_session():
+    """حاول تحمّل جلسة موجودة عند بدء البوت"""
     global pyro_app, pytgcalls_client
     if not VOICE_ENABLED:
         return False
     try:
-        pyro_app = Client(
-            "voice_bot",
+        if not os.path.exists(SESSION_FILE):
+            return False
+        with open(SESSION_FILE, "r") as f:
+            session_string = f.read().strip()
+        if not session_string:
+            return False
+        client = Client(
+            "voice_session",
             api_id=API_ID,
             api_hash=API_HASH,
-            phone_number=PHONE,
+            session_string=session_string,
             in_memory=True
         )
-        await pyro_app.start()
-        pytgcalls_client = PyTgCalls(pyro_app)
+        await client.start()
+        pytgcalls_client = PyTgCalls(client)
         await pytgcalls_client.start()
+        pyro_app = client
+        print("✅ تم تحميل جلسة الحساب المساعد")
         return True
     except Exception as e:
-        logging.error(f"فشل تهيئة الكول: {e}")
+        print(f"⚠️ فشل تحميل الجلسة: {e}")
         return False
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -163,16 +307,23 @@ async def init_voice_client():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 async def play_in_call(update, context, query: str, msg, is_video: bool = False):
     chat_id = update.effective_chat.id
-    
-    if not VOICE_ENABLED or pytgcalls_client is None:
-        await msg.edit_text(
-            "⚠️ ميزة التشغيل في الكول تحتاج إعداد حساب مساعد (Userbot)\n"
-            "تأكد من إضافة pyrogram و pytgcalls في requirements.txt وتشغيل الحساب المساعد أولاً"
-        )
+    user_id = update.effective_user.id
+
+    # لو الجلسة مش موجودة ابدأ الإعداد مع الأونر
+    if not VOICE_ENABLED:
+        await msg.edit_text("⚠️ pyrogram/pytgcalls مش مثبتين في السيرفر.")
+        return
+
+    if pytgcalls_client is None:
+        if user_id == OWNER_ID or is_admin(user_id, chat_id):
+            await start_session_setup(context.bot, OWNER_ID, trigger_msg=msg)
+        else:
+            await msg.edit_text("⚙️ البوت بيتجهز للتشغيل الصوتي، انتظر قليلاً أو تواصل مع الأدمن.")
         return
 
     try:
         # تحميل الصوت/الفيديو
+        await msg.edit_text(f"{'🎬' if is_video else '🎵'} جاري تحميل: {query}\n⏳ لحظة...")
         if is_video:
             filepath, title = await download_video(query)
         else:
@@ -182,28 +333,16 @@ async def play_in_call(update, context, query: str, msg, is_video: bool = False)
             await msg.edit_text(f"❌ فشل تحميل: {query}")
             return
 
-        await msg.edit_text(f"{'🎬' if is_video else '🎵'} {'جاري رفع الفيديو' if is_video else 'جاري التشغيل'}: {title}\n⚡ Developer by {DEVELOPER}")
-
-        # الانضمام للكول وتشغيل الملف
+        # بناء الـ stream
         if is_video:
-            stream = MediaStream(
-                filepath,
-                audio_quality=AudioQuality.HIGH,
-                video_quality=VideoQuality.SD_480p
-            )
+            stream = MediaStream(filepath, audio_quality=AudioQuality.HIGH, video_quality=VideoQuality.SD_480p)
         else:
-            stream = MediaStream(
-                filepath,
-                audio_quality=AudioQuality.HIGH,
-                video_flags=MediaStream.IGNORE
-            )
+            stream = MediaStream(filepath, audio_quality=AudioQuality.HIGH, video_flags=MediaStream.IGNORE)
 
-        active = active_calls.get(chat_id)
-        if active:
-            # إذا في تشغيل حالي - غير المقطع
+        # تشغيل أو تغيير المقطع الحالي
+        if active_calls.get(chat_id):
             await pytgcalls_client.change_stream(chat_id, stream)
         else:
-            # انضم للكول وابدأ التشغيل
             await pytgcalls_client.play(chat_id, stream)
 
         active_calls[chat_id] = {"playing": True, "paused": False, "loop": False, "title": title, "file": filepath}
@@ -216,10 +355,18 @@ async def play_in_call(update, context, query: str, msg, is_video: bool = False)
     except Exception as e:
         err = str(e)
         if "not in" in err.lower() or "GroupCallNotFound" in err or "not found" in err.lower():
-            await msg.edit_text("❌ البوت مش في دردشة صوتية - افتح كول أولاً ثم اكتب الأمر")
+            await msg.edit_text("❌ الحساب المساعد مش في الدردشة الصوتية\nافتح كول أولاً ثم كرر الأمر")
+        elif "SESSION" in err.upper() or "AUTH" in err.upper():
+            # الجلسة انتهت - امسح وابدأ من أول
+            if os.path.exists(SESSION_FILE):
+                os.remove(SESSION_FILE)
+            global pyro_app, pytgcalls_client
+            pyro_app = None
+            pytgcalls_client = None
+            await msg.edit_text("⚠️ انتهت صلاحية الجلسة، جاري إعادة الإعداد...")
+            await start_session_setup(context.bot, OWNER_ID)
         else:
             await msg.edit_text(f"❌ خطأ في التشغيل: {err[:150]}")
-        # تنظيف الملف لو فيه
         try:
             fp = active_calls.get(chat_id, {}).get("file")
             if fp and os.path.exists(fp):
@@ -603,6 +750,12 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
+    # ━ التحقق من وضع إنشاء الجلسة (الأولوية القصوى)
+    if update.effective_chat.type == "private":
+        handled = await handle_session_setup(update, context)
+        if handled:
+            return
+
     # ━ فلتر الروابط
     if link_filter.get(chat_id) and ("t.me" in text or "http" in text):
         if not is_admin(user_id, chat_id):
@@ -904,13 +1057,13 @@ async def main():
     app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, new_member))
 
     print("⚡ البوت شغال...")
-    # تهيئة الحساب المساعد للتشغيل الصوتي
+    # تحميل جلسة الحساب المساعد لو موجودة
     if VOICE_ENABLED:
-        voice_ok = await init_voice_client()
+        voice_ok = await load_existing_session()
         if voice_ok:
             print("✅ الحساب المساعد شغال - التشغيل الصوتي جاهز")
         else:
-            print("⚠️ فشل تشغيل الحساب المساعد - أوامر الكول مش هتشتغل")
+            print("⚠️ مفيش جلسة محفوظة - البوت هيطلب إعدادها أول ما حد يحاول يشغل موسيقى")
     else:
         print("⚠️ pyrogram/pytgcalls مش مثبتين - أوامر الكول معطلة")
     
