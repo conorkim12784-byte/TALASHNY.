@@ -18,8 +18,11 @@ try:
     from pyrogram import Client
     from pyrogram.errors import UserAlreadyParticipant, UserNotParticipant
     from pytgcalls import PyTgCalls
-    from pytgcalls.types import MediaStream, AudioQuality, VideoQuality, Update as TgUpdate
+    from pytgcalls.types import Update as TgUpdate
+    from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
+    from pytgcalls.types.input_stream.quality import HighQualityAudio, HighQualityVideo, MediumQualityVideo, LowQualityVideo
     from pytgcalls.types.stream import StreamAudioEnded
+    from pytgcalls import StreamType
     VOICE_ENABLED = True
 except ImportError:
     VOICE_ENABLED = False
@@ -224,21 +227,21 @@ def _register_call_events():
         return
 
     @pytgcalls_client.on_stream_end()
-    async def stream_end_handler(_, update: TgUpdate):
+    async def stream_end_handler(client: PyTgCalls, update: TgUpdate):
         if isinstance(update, StreamAudioEnded):
             chat_id = update.chat_id
             await _play_next(chat_id)
 
     @pytgcalls_client.on_kicked()
-    async def kicked_handler(_, chat_id: int):
+    async def kicked_handler(client: PyTgCalls, chat_id: int):
         clear_queue(chat_id)
 
     @pytgcalls_client.on_closed_voice_chat()
-    async def closed_vc_handler(_, chat_id: int):
+    async def closed_vc_handler(client: PyTgCalls, chat_id: int):
         clear_queue(chat_id)
 
     @pytgcalls_client.on_left()
-    async def left_handler(_, chat_id: int):
+    async def left_handler(client: PyTgCalls, chat_id: int):
         clear_queue(chat_id)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -351,9 +354,9 @@ async def download_video_file(query: str, output_dir="/tmp") -> tuple:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _build_stream(stream_url: str, is_video: bool):
     if is_video:
-        return MediaStream(stream_url, audio_quality=AudioQuality.HIGH, video_quality=VideoQuality.SD_480p)
+        return AudioVideoPiped(stream_url, HighQualityAudio(), HighQualityVideo())
     else:
-        return MediaStream(stream_url, audio_quality=AudioQuality.HIGH, video_flags=MediaStream.IGNORE)
+        return AudioPiped(stream_url, HighQualityAudio())
 
 async def _ensure_userbot_in_chat(c_bot, chat_id: int):
     """تأكد إن الحساب المساعد موجود في المجموعة - زي السورس"""
@@ -388,7 +391,7 @@ async def _play_next(chat_id: int):
     if not queue:
         if pytgcalls_client:
             try:
-                await pytgcalls_client.leave_call(chat_id)
+                await pytgcalls_client.leave_group_call(chat_id)
             except Exception:
                 pass
         return
@@ -446,7 +449,7 @@ async def play_in_call(update, context, query: str, msg, is_video: bool = False)
         else:
             # مفيش تشغيل - ابدأ مباشرة
             stream = _build_stream(stream_url, is_video)
-            await pytgcalls_client.play(chat_id, stream)
+            await pytgcalls_client.join_group_call(chat_id, stream, stream_type=StreamType().local_stream)
             add_to_queue(chat_id, title, stream_url, webpage_url, media_type, 720 if is_video else 0)
 
             emoji = "🎬" if is_video else "🎵"
@@ -713,7 +716,7 @@ async def player_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("stop_"):
         if pytgcalls_client:
             try:
-                await pytgcalls_client.leave_call(chat_id)
+                await pytgcalls_client.leave_group_call(chat_id)
             except Exception:
                 pass
         clear_queue(chat_id)
@@ -923,7 +926,7 @@ async def cmd_stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ قائمة التشغيل فارغة")
     try:
         if pytgcalls_client:
-            await pytgcalls_client.leave_call(chat_id)
+            await pytgcalls_client.leave_group_call(chat_id)
         clear_queue(chat_id)
         await update.message.reply_text("⏹ **تم إيقاف التشغيل**", parse_mode="Markdown")
     except Exception as e:
@@ -1059,7 +1062,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await update.message.reply_text("❌ مفيش تشغيل حالياً")
         try:
             if pytgcalls_client:
-                await pytgcalls_client.leave_call(chat_id)
+                await pytgcalls_client.leave_group_call(chat_id)
             clear_queue(chat_id)
             await update.message.reply_text("⏹ **تم إيقاف التشغيل**", parse_mode="Markdown")
         except Exception as e:
