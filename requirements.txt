@@ -9,7 +9,7 @@ lyricsgenius
 motor
 pillow
 psutil
-pytgcalls==3.0.0.dev24
+pytgcalls==3.0.0.dev22
 pyrogram==2.0.106
 python-dotenv
 pyyaml==6.0
